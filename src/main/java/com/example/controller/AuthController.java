@@ -1,8 +1,11 @@
 package com.example.controller;
 
 import com.example.entity.User;
+import com.example.entity.PendingRegistration;
 import com.example.repository.UserRepository;
+import com.example.repository.PendingRegistrationRepository;
 import com.example.security.JwtService;
+import com.example.service.EmailService;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -21,6 +24,8 @@ public class AuthController {
     private final UserRepository repo;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+    private final PendingRegistrationRepository pendingRepo;
+    private final EmailService emailService;
     private final String jwtCookieName;
     private final long jwtExpirationMs;
     private final boolean jwtCookieSecure;
@@ -28,47 +33,121 @@ public class AuthController {
 
     public AuthController(
             UserRepository repo,
+            PendingRegistrationRepository pendingRepo,
+            EmailService emailService,
             PasswordEncoder passwordEncoder,
             JwtService jwtService,
             @Value("${jwt.cookie-name:auth_token}") String jwtCookieName,
             @Value("${jwt.expiration-ms:86400000}") long jwtExpirationMs,
+            @Value("${otp.expiration-minutes:10}") long otpExpirationMinutes,
             @Value("${jwt.cookie-secure:false}") boolean jwtCookieSecure,
-            @Value("${jwt.cookie-samesite:Lax}") String jwtCookieSameSite
-    ) {
+            @Value("${jwt.cookie-samesite:Lax}") String jwtCookieSameSite) {
         this.repo = repo;
+        this.pendingRepo = pendingRepo;
+        this.emailService = emailService;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.jwtCookieName = jwtCookieName;
         this.jwtExpirationMs = jwtExpirationMs;
+        this.otpExpirationMinutes = otpExpirationMinutes;
         this.jwtCookieSecure = jwtCookieSecure;
         this.jwtCookieSameSite = jwtCookieSameSite;
     }
 
+    private final long otpExpirationMinutes;
+
+    // 🔹 Đăng ký
     // 🔹 Đăng ký
     @PostMapping("/register")
     public ResponseEntity<?> register(@RequestBody User user) {
-
-        // ❌ Check username
+        // Xóa các bản ghi Pending đã hết hạn trước khi xử lý đăng ký mới
+        pendingRepo.deleteByExpiresAtBefore(java.time.Instant.now());
+        // 1. Kiểm tra trong bảng User chính thức
+        if (repo.existsByEmail(user.getEmail())) {
+            return ResponseEntity.badRequest().body("Email đã được sử dụng");
+        }
         if (repo.existsByUsername(user.getUsername())) {
             return ResponseEntity.badRequest().body("Username đã tồn tại");
         }
 
-        // ❌ Check email trùng
-        if (repo.existsByEmail(user.getEmail())) {
-            return ResponseEntity.badRequest().body("Email đã tồn tại");
-        }
-
-        // ❌ Check email format
+        // 2. Validate định dạng email
         if (!user.getEmail().matches("^[A-Za-z0-9+_.-]+@(.+)$")) {
             return ResponseEntity.badRequest().body("Email không hợp lệ");
         }
 
-        // ✅ OK
-        user.setRole(User.Role.USER);
-        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        // 3. Tạo mã OTP mới và tính thời gian hết hạn
+        String code = String.format("%06d", (int) (Math.random() * 1_000_000));
+        java.time.Instant expiresAt = java.time.Instant.now().plusSeconds(otpExpirationMinutes * 60);
+
+        // 4. Xử lý logic lưu vào Pending
+        Optional<PendingRegistration> existingPending = pendingRepo.findByEmail(user.getEmail());
+        PendingRegistration p;
+
+        if (existingPending.isPresent()) {
+            // Đã có trong phòng chờ (User ấn Quay lại) -> Cập nhật lại mã và thời gian
+            p = existingPending.get();
+            p.setUsername(user.getUsername());
+            p.setEncodedPassword(passwordEncoder.encode(user.getPassword()));
+            p.setCode(code);
+            p.setExpiresAt(expiresAt);
+        } else {
+            // Hoàn toàn mới -> Check xem username có ai đang mượn tạm trong phòng chờ không
+            if (pendingRepo.findByUsername(user.getUsername()).isPresent()) {
+                return ResponseEntity.badRequest().body("Username đang chờ người khác xác thực");
+            }
+
+            // Tạo mới
+            p = new PendingRegistration();
+            p.setUsername(user.getUsername());
+            p.setEmail(user.getEmail());
+            p.setEncodedPassword(passwordEncoder.encode(user.getPassword()));
+            p.setRole(User.Role.USER.name());
+            p.setCode(code);
+            p.setExpiresAt(expiresAt);
+        }
+
+        // 5. Lưu xuống DB và gửi Email
+        pendingRepo.save(p);
+        emailService.sendOtp(user.getEmail(), code);
+
+        return ResponseEntity.ok("Mã OTP đã được gửi đến email của bạn");
+    }
+
+    @PostMapping("/register/verify")
+    public ResponseEntity<?> verifyRegistration(@RequestBody VerifyRequest req) {
+        if (req == null || req.email == null || req.code == null) {
+            return ResponseEntity.badRequest().body("Thiếu email hoặc mã");
+        }
+
+        var opt = pendingRepo.findByEmail(req.email);
+        if (opt.isEmpty()) {
+            return ResponseEntity.status(400).body("Không tìm thấy đăng ký đang chờ");
+        }
+
+        PendingRegistration p = opt.get();
+        if (p.getExpiresAt().isBefore(java.time.Instant.now())) {
+            pendingRepo.delete(p);
+            return ResponseEntity.status(400).body("Mã đã hết hạn");
+        }
+
+        if (!p.getCode().equals(req.code)) {
+            return ResponseEntity.status(400).body("Mã không hợp lệ");
+        }
+
+        User user = new User();
+        user.setUsername(p.getUsername());
+        user.setEmail(p.getEmail());
+        user.setPassword(p.getEncodedPassword());
+        user.setRole(User.Role.valueOf(p.getRole()));
         repo.save(user);
+        pendingRepo.delete(p);
 
         return ResponseEntity.ok("Đăng ký thành công");
+    }
+
+    public static class VerifyRequest {
+        public String email;
+        public String code;
     }
 
     // 🔹 Đăng nhập
@@ -82,16 +161,16 @@ public class AuthController {
             loggedInUser.setPassword(null); // ✅ Xóa trắng password trước khi gửi về React để bảo mật
             String token = jwtService.generateToken(loggedInUser);
             ResponseCookie cookie = ResponseCookie.from(jwtCookieName, token)
-                .httpOnly(true)
-                .secure(jwtCookieSecure)
-                .path("/")
-                .maxAge(Duration.ofMillis(jwtExpirationMs))
-                .sameSite(jwtCookieSameSite)
-                .build();
+                    .httpOnly(true)
+                    .secure(jwtCookieSecure)
+                    .path("/")
+                    .maxAge(Duration.ofMillis(jwtExpirationMs))
+                    .sameSite(jwtCookieSameSite)
+                    .build();
 
             return ResponseEntity.ok()
-                .header(HttpHeaders.SET_COOKIE, cookie.toString())
-                .body(loggedInUser);
+                    .header(HttpHeaders.SET_COOKIE, cookie.toString())
+                    .body(loggedInUser);
         }
 
         return ResponseEntity
@@ -137,8 +216,7 @@ public class AuthController {
     @PostMapping("/change-password")
     public ResponseEntity<?> changePassword(
             @CookieValue(name = "${jwt.cookie-name:auth_token}", required = false) String token,
-            @RequestBody ChangePasswordRequest request
-    ) {
+            @RequestBody ChangePasswordRequest request) {
         if (token == null || token.isBlank() || !jwtService.isTokenValid(token)) {
             return ResponseEntity.status(401).body("Chưa đăng nhập");
         }
