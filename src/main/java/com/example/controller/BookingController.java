@@ -34,6 +34,7 @@ public class BookingController {
     private final SeatRepository seatRepository;
     private final ShowtimeRepository showtimeRepository;
     private final RoomRepository roomRepository;
+    private final CinemaRepository cinemaRepository;
     private final MovieRepository movieRepository;
     private final UserRepository userRepository;
     private final SepayService sepayService;
@@ -44,6 +45,7 @@ public class BookingController {
             SeatRepository seatRepository,
             ShowtimeRepository showtimeRepository,
             RoomRepository roomRepository,
+            CinemaRepository cinemaRepository,
             MovieRepository movieRepository,
             UserRepository userRepository,
                 SepayService sepayService
@@ -53,10 +55,12 @@ public class BookingController {
         this.seatRepository = seatRepository;
         this.showtimeRepository = showtimeRepository;
         this.roomRepository = roomRepository;
+        this.cinemaRepository = cinemaRepository;
         this.movieRepository = movieRepository;
         this.userRepository = userRepository;
         this.sepayService = sepayService;
     }
+
 
     @GetMapping("/showtimes/by-cinema-movie")
     @Transactional
@@ -64,7 +68,6 @@ public class BookingController {
             @RequestParam Integer cinemaId,
             @RequestParam Integer movieId
     ) {
-        cleanupEndedShowtimeBookings();
         List<Showtime> allShowtimes = showtimeRepository.findAll();
         List<Room> rooms = roomRepository.findByCinemaId(cinemaId);
         Set<Integer> roomIds = rooms.stream().map(Room::getId).collect(Collectors.toSet());
@@ -79,10 +82,10 @@ public class BookingController {
         return ResponseEntity.ok(filtered);
     }
 
+
     @GetMapping("/showtimes/{showtimeId}/booked-seat-ids")
     @Transactional
     public ResponseEntity<List<Integer>> getBookedSeatIds(@PathVariable Integer showtimeId) {
-        cleanupEndedShowtimeBookings();
         bookingRepository.cancelExpiredPendingByShowtimeId(showtimeId);
         return ResponseEntity.ok(bookingSeatRepository.findBookedSeatIdsByShowtimeId(showtimeId));
     }
@@ -425,7 +428,6 @@ public class BookingController {
             return ResponseEntity.badRequest().body("Thiếu thông tin đặt vé.");
         }
 
-        cleanupEndedShowtimeBookings();
         bookingRepository.cancelExpiredPendingByShowtimeId(request.getShowtimeId());
 
         if (userRepository.findById(request.getUserId()).isEmpty()) {
@@ -530,9 +532,7 @@ public class BookingController {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
-    private void cleanupEndedShowtimeBookings() {
-        bookingRepository.deleteBookingsForEndedShowtimes();
-    }
+
 
     @GetMapping("/admin/bookings")
     public ResponseEntity<List<Map<String, Object>>> getBookingsForAdmin(@RequestParam Integer cinemaId) {
@@ -541,12 +541,34 @@ public class BookingController {
         return ResponseEntity.ok(mapBookingRows(bookings));
     }
 
+    @DeleteMapping("/admin/bookings/{id}")
+    @Transactional
+    public ResponseEntity<Void> deleteBooking(@PathVariable Integer id) {
+        Optional<Booking> bookingOpt = bookingRepository.findById(id);
+        if (bookingOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        Booking booking = bookingOpt.get();
+        if (booking.getStatus() == Booking.BookingStatus.PAID) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+        }
+
+        List<BookingSeat> seatRows = bookingSeatRepository.findByBookingId(id);
+        if (!seatRows.isEmpty()) {
+            bookingSeatRepository.deleteAll(seatRows);
+        }
+        bookingRepository.deleteById(id);
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/admin/revenue/weekly")
-    public ResponseEntity<List<Map<String, Object>>> getWeeklyRevenue(
-            @RequestParam(defaultValue = "12") int weeks
+    public ResponseEntity<List<Map<String, Object>>> getWeeklyRevenueByCinema(
+            @RequestParam(defaultValue = "12") int weeks,
+            @RequestParam Integer cinemaId
     ) {
         int safeWeeks = Math.max(1, Math.min(52, weeks));
-        List<Object[]> rows = bookingRepository.aggregateWeeklyRevenue(safeWeeks);
+        List<Object[]> rows = bookingRepository.aggregateWeeklyRevenueByCinema(safeWeeks, cinemaId);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object[] row : rows) {
             Map<String, Object> item = new LinkedHashMap<>();
@@ -560,11 +582,12 @@ public class BookingController {
     }
 
     @GetMapping("/admin/revenue/monthly")
-    public ResponseEntity<List<Map<String, Object>>> getMonthlyRevenue(
-            @RequestParam(defaultValue = "12") int months
+    public ResponseEntity<List<Map<String, Object>>> getMonthlyRevenueByCinema(
+            @RequestParam(defaultValue = "12") int months,
+            @RequestParam Integer cinemaId
     ) {
         int safeMonths = Math.max(1, Math.min(36, months));
-        List<Object[]> rows = bookingRepository.aggregateMonthlyRevenue(safeMonths);
+        List<Object[]> rows = bookingRepository.aggregateMonthlyRevenueByCinema(safeMonths, cinemaId);
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object[] row : rows) {
             Map<String, Object> item = new LinkedHashMap<>();
@@ -580,7 +603,8 @@ public class BookingController {
     public ResponseEntity<List<Map<String, Object>>> getTopMovies(
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(required = false) String from,
-            @RequestParam(required = false) String to
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) Integer cinemaId
     ) {
         int safeLimit = Math.max(1, Math.min(200, limit));
         LocalDateTime fromDate = null;
@@ -597,7 +621,7 @@ public class BookingController {
             toDate = null;
         }
 
-        List<Object[]> rows = bookingSeatRepository.aggregateTopMoviesByVenue(fromDate, toDate);
+        List<Object[]> rows = bookingSeatRepository.aggregateTopMoviesByVenue(fromDate, toDate, cinemaId);
         List<Map<String, Object>> result = new ArrayList<>();
 
         int count = 0;
@@ -652,12 +676,22 @@ public class BookingController {
         Map<Integer, Showtime> showtimeMap = showtimeRepository.findAll().stream()
                 .collect(Collectors.toMap(Showtime::getId, s -> s));
 
+        Map<Integer, Room> roomMap = roomRepository.findAll().stream()
+            .collect(Collectors.toMap(Room::getId, r -> r));
+
+        Map<Integer, String> cinemaNames = cinemaRepository.findAll().stream()
+            .collect(Collectors.toMap(Cinema::getId, Cinema::getName));
+
         List<Map<String, Object>> result = new ArrayList<>();
         for (Booking booking : bookings) {
             Showtime showtime = showtimeMap.get(booking.getShowtimeId());
             if (showtime == null) {
                 continue;
             }
+
+            Room room = roomMap.get(showtime.getRoomId());
+            Integer cinemaId = room == null ? null : room.getCinemaId();
+            String cinemaName = cinemaId == null ? "N/A" : cinemaNames.getOrDefault(cinemaId, "N/A");
 
             List<BookingSeat> items = bookingSeatRepository.findByBookingId(booking.getId());
             List<Integer> seatIds = items.stream().map(BookingSeat::getSeatId).toList();
@@ -695,6 +729,8 @@ public class BookingController {
             row.put("movieId", showtime.getMovieId());
             row.put("movieTitle", movieTitles.getOrDefault(showtime.getMovieId(), "N/A"));
             row.put("roomId", showtime.getRoomId());
+            row.put("cinemaId", cinemaId);
+            row.put("cinemaName", cinemaName);
             row.put("startTime", showtime.getStartTime());
             row.put("status", booking.getStatus());
             row.put("totalPrice", booking.getTotalPrice());
@@ -721,7 +757,7 @@ public class BookingController {
         BigDecimal multiplier;
         switch (normalizedType) {
             case "VIP" -> multiplier = BigDecimal.valueOf(1.5);
-            case "COUPLE" -> multiplier = BigDecimal.valueOf(2.0);
+            case "COUPLE" -> multiplier = BigDecimal.ONE;
             default -> multiplier = BigDecimal.ONE;
         }
 

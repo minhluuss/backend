@@ -21,6 +21,7 @@ public interface BookingSeatRepository extends JpaRepository<BookingSeat, Intege
             @Param("seatIds") List<Integer> seatIds
     );
 
+
             @Query(value = "SELECT m.Id AS movieId, m.Title AS movieTitle, " +
                 "c.Id AS cinemaId, c.Name AS cinemaName, " +
                 "r.Id AS roomId, r.Name AS roomName, " +
@@ -34,11 +35,13 @@ public interface BookingSeatRepository extends JpaRepository<BookingSeat, Intege
                 "WHERE b.Status = 'PAID' " +
                 "AND (:fromDate IS NULL OR b.CreatedAt >= :fromDate) " +
                 "AND (:toDate IS NULL OR b.CreatedAt < :toDate) " +
+                "AND (:cinemaId IS NULL OR c.Id = :cinemaId) " +
                 "GROUP BY m.Id, m.Title, c.Id, c.Name, r.Id, r.Name " +
                 "ORDER BY bookingCount DESC, seatCount DESC",
                 nativeQuery = true)
             List<Object[]> aggregateTopMoviesByVenue(
                 @Param("fromDate") java.time.LocalDateTime fromDate,
-                @Param("toDate") java.time.LocalDateTime toDate
+                @Param("toDate") java.time.LocalDateTime toDate,
+                @Param("cinemaId") Integer cinemaId
             );
 }

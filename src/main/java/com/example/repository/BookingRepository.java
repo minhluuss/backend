@@ -38,19 +38,23 @@ public interface BookingRepository extends JpaRepository<Booking, Integer> {
             "SUM(b.TotalPrice) AS revenue, " +
             "COUNT(*) AS bookingCount " +
             "FROM Bookings b " +
-            "WHERE b.Status = 'PAID' AND b.CreatedAt >= DATE_SUB(CURDATE(), INTERVAL :weeks WEEK) " +
+            "JOIN Showtimes s ON s.Id = b.ShowtimeId " +
+            "JOIN Rooms r ON r.Id = s.RoomId " +
+            "WHERE b.Status = 'PAID' AND b.CreatedAt >= DATE_SUB(CURDATE(), INTERVAL :weeks WEEK) AND r.CinemaId = :cinemaId " +
             "GROUP BY yearWeek, weekStart " +
             "ORDER BY yearWeek",
             nativeQuery = true)
-        List<Object[]> aggregateWeeklyRevenue(@Param("weeks") int weeks);
+        List<Object[]> aggregateWeeklyRevenueByCinema(@Param("weeks") int weeks, @Param("cinemaId") int cinemaId);
 
         @Query(value = "SELECT DATE_FORMAT(b.CreatedAt, '%Y-%m') AS month, " +
             "SUM(b.TotalPrice) AS revenue, " +
             "COUNT(*) AS bookingCount " +
             "FROM Bookings b " +
-            "WHERE b.Status = 'PAID' AND b.CreatedAt >= DATE_SUB(CURDATE(), INTERVAL :months MONTH) " +
+            "JOIN Showtimes s ON s.Id = b.ShowtimeId " +
+            "JOIN Rooms r ON r.Id = s.RoomId " +
+            "WHERE b.Status = 'PAID' AND b.CreatedAt >= DATE_SUB(CURDATE(), INTERVAL :months MONTH) AND r.CinemaId = :cinemaId " +
             "GROUP BY month " +
             "ORDER BY month",
             nativeQuery = true)
-        List<Object[]> aggregateMonthlyRevenue(@Param("months") int months);
+        List<Object[]> aggregateMonthlyRevenueByCinema(@Param("months") int months, @Param("cinemaId") int cinemaId);
 }
