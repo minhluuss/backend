@@ -17,10 +17,10 @@ public class JwtService {
     private final SecretKey key;
     private final long expirationMs;
 
+    // Trong constructor của JwtService
     public JwtService(
-            @Value("${jwt.secret}") String secret,
-            @Value("${jwt.expiration-ms:86400000}") long expirationMs
-    ) {
+            @Value("${jwt.secret:my-very-long-secret-key-must-be-over-32-chars-long-123}") String secret,
+            @Value("${jwt.expiration-ms:86400000}") long expirationMs) {
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.expirationMs = expirationMs;
     }
