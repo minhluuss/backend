@@ -2,6 +2,7 @@ package com.example.controller;
 
 import com.example.entity.*;
 import com.example.repository.*;
+import com.example.service.EmailService;
 import com.example.service.SepayService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,7 +18,6 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.Base64;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -28,7 +28,9 @@ public class BookingController {
     private static final Logger logger = LoggerFactory.getLogger(BookingController.class);
 
     private static final long PENDING_HOLD_MINUTES = 10;
-
+    
+    // 1. Khai báo final cho đồng bộ với kiến trúc
+    private final EmailService emailService;
     private final BookingRepository bookingRepository;
     private final BookingSeatRepository bookingSeatRepository;
     private final SeatRepository seatRepository;
@@ -39,7 +41,9 @@ public class BookingController {
     private final UserRepository userRepository;
     private final SepayService sepayService;
 
+    // 2. Thêm EmailService vào tham số của hàm khởi tạo
     public BookingController(
+            EmailService emailService,
             BookingRepository bookingRepository,
             BookingSeatRepository bookingSeatRepository,
             SeatRepository seatRepository,
@@ -48,8 +52,10 @@ public class BookingController {
             CinemaRepository cinemaRepository,
             MovieRepository movieRepository,
             UserRepository userRepository,
-                SepayService sepayService
+            SepayService sepayService
     ) {
+        // 3. Khởi tạo giá trị
+        this.emailService = emailService; 
         this.bookingRepository = bookingRepository;
         this.bookingSeatRepository = bookingSeatRepository;
         this.seatRepository = seatRepository;
@@ -130,22 +136,28 @@ public class BookingController {
         return redirectToFrontend("FAILED", "Thanh_toan_that_bai", bookingId);
     }
 
-    @GetMapping("/payments/sepay/cancel")
-    @Transactional
-    public ResponseEntity<Void> handleSepayCancel(@RequestParam(required = false) Integer bookingId) {
-        if (bookingId != null) {
-            Optional<Booking> bookingOpt = bookingRepository.findById(bookingId);
-            if (bookingOpt.isPresent()) {
-                Booking booking = bookingOpt.get();
-                if (booking.getStatus() == Booking.BookingStatus.PAID) {
-                    return redirectToFrontend("SUCCESS", "Don_da_thanh_toan", bookingId);
-                }
+   @GetMapping("/payments/sepay/cancel")
+@Transactional
+public ResponseEntity<Void> handleSepayCancel(@RequestParam(required = false) Integer bookingId) {
+    if (bookingId != null) {
+        Optional<Booking> bookingOpt = bookingRepository.findById(bookingId);
+        if (bookingOpt.isPresent()) {
+            Booking booking = bookingOpt.get();
+            
+            // Nếu đã trả tiền -> Đẩy về trang thành công
+            if (booking.getStatus() == Booking.BookingStatus.PAID) {
+                return redirectToFrontend("SUCCESS", "Don_da_thanh_toan", bookingId);
+            }
+            
+            // CHỈ cập nhật và lưu nếu đơn thực sự đang PENDING
+            if (booking.getStatus() == Booking.BookingStatus.PENDING) {
                 booking.setStatus(Booking.BookingStatus.CANCELLED);
                 bookingRepository.save(booking);
             }
         }
-        return redirectToFrontend("CANCELLED", "Ban_da_huy_thanh_toan", bookingId);
     }
+    return redirectToFrontend("CANCELLED", "Ban_da_huy_thanh_toan", bookingId);
+}
 
     @PostMapping("/payments/sepay/ipn")
     @Transactional
@@ -368,8 +380,75 @@ public class BookingController {
             }
         }
 
+        // 1. Đổi trạng thái đơn hàng thành PAID và lưu lại
         booking.setStatus(Booking.BookingStatus.PAID);
         bookingRepository.save(booking);
+
+       // 2. Tự động gửi Email thông tin vé
+        try {
+            userRepository.findById(booking.getUserId()).ifPresent(user -> {
+                String toEmail = user.getEmail();
+
+                // 1. Lấy danh sách tên ghế
+                List<Seat> seats = seatRepository.findAllById(seatIds);
+                String seatLabels = seats.stream()
+                        .map(seat -> seat.getSeatRow() + seat.getSeatNumber()) 
+                        .reduce((a, b) -> a + ", " + b)
+                        .orElse("Không rõ");
+
+                // 2. Format tiền
+                String formattedPrice = String.format("%,d", booking.getTotalPrice().longValue());
+
+                // 3. Khai thác dữ liệu từ Showtime
+                showtimeRepository.findById(booking.getShowtimeId()).ifPresent(showtime -> {
+                    java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm - dd/MM/yyyy");
+                    String showtimeStr = showtime.getStartTime() != null ? showtime.getStartTime().format(formatter) : "Không rõ";
+
+                    // Moi tên phim ra
+                    String movieTitle = "Phim tại CinemaBooking";
+                    if (showtime.getMovieId() != null) {
+                        movieTitle = movieRepository.findById(showtime.getMovieId())
+                                .map(movie -> movie.getTitle())
+                                .orElse("Phim tại CinemaBooking");
+                    }
+
+                    // Tách biến để lấy tên phòng và tên rạp
+                    String cinemaName = "Hệ thống Rạp chiếu";
+                    String roomName = "Chưa cập nhật"; 
+
+                    if (showtime.getRoomId() != null) {
+                        // Khai báo kiểu Optional cũ để tránh lỗi Lambda scope
+                        Optional<com.example.entity.Room> roomOpt = roomRepository.findById(showtime.getRoomId());
+                        if (roomOpt.isPresent()) {
+                            com.example.entity.Room room = roomOpt.get();
+                            roomName = room.getName(); // 👈 NẾU HÀM LẤY TÊN PHÒNG LÀ getRoomName(), BẠN SỬA LẠI CHỖ NÀY NHÉ
+                            
+                            // Lấy tiếp tên Rạp từ ID của phòng
+                            if (room.getCinemaId() != null) {
+                                cinemaName = cinemaRepository.findById(room.getCinemaId())
+                                        .map(cinema -> cinema.getName())
+                                        .orElse("Hệ thống Rạp chiếu");
+                            }
+                        }
+                    }
+
+                    // Gọi Service gửi mail HTML với tham số roomName mới thêm
+                    emailService.sendTicketEmail(
+                            toEmail,
+                            String.valueOf(booking.getId()),
+                            movieTitle,
+                            cinemaName,
+                            roomName, // 👈 ĐÃ TRUYỀN TÊN PHÒNG VÀO ĐÂY
+                            showtimeStr,
+                            seatLabels,
+                            formattedPrice
+                    );
+                });
+            });
+        } catch (Exception e) {
+            System.err.println("Lỗi gửi email vé: " + e.getMessage());
+        }
+
         return new PaymentFinalizeResult(true, "PAID", "Thanh_toan_thanh_cong");
     }
 

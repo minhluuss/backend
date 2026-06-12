@@ -15,7 +15,6 @@ import java.util.UUID;
 @RequestMapping("/api/upload")
 public class FileUploadController {
 
-    // Nơi lưu file (Tương ứng với thư mục vừa tạo ở Bước 1)
     private static final String UPLOAD_DIR = "uploads/";
 
     @PostMapping
