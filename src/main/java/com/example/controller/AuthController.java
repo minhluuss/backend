@@ -49,7 +49,7 @@ public class AuthController {
             @Value("${jwt.cookie-samesite:Lax}") String jwtCookieSameSite) {
         this.repo = repo;
         this.pendingRepo = pendingRepo;
-        this.passwordOtpRepo = passwordOtpRepo; // ✅ Đã thêm
+        this.passwordOtpRepo = passwordOtpRepo; 
         this.emailService = emailService;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
